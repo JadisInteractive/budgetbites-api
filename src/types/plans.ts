@@ -77,3 +77,85 @@ export interface PlanJobResponse {
   planId: string | null;
   submittedAt: string;
 }
+
+// ---------------------------------------------------------------------------
+// Mirror of GroceryPriceEntry from grocery-scraper.
+// Not imported directly to keep modules decoupled at this stage.
+// ---------------------------------------------------------------------------
+export interface GroceryPriceEntry {
+  scrape_run_id?: string | null;
+  chain_id: string;
+  store_id: string;
+  store_name?: string | null;
+  region: string;
+  product_name: string;
+  price: number;
+  sale_type?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  circular_url?: string | null;
+  last_updated?: string | Date | null;
+  created_at?: string | Date | null;
+}
+
+// ---------------------------------------------------------------------------
+// Recipe Matcher types
+// ---------------------------------------------------------------------------
+export interface ScoredItem {
+  entry: GroceryPriceEntry;
+  trafficLight: TrafficLight;
+  complianceScore: number; // 0–100, higher = better fit
+}
+
+export interface MealPlanItem {
+  productName: string;
+  price: number;
+  saleType: string | null;
+  trafficLight: TrafficLight;
+  scrapeRunId: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Generation pipeline types
+// ---------------------------------------------------------------------------
+export interface DeterministicPayload {
+  householdModel: HouseholdModel;
+  weekOf: string;
+  budgetUsd: number;
+  effectiveBudgetUsd: number; // budgetUsd * 0.9 (10% buffer applied by Price Engine)
+  resolvedConstraints: ResolvedConstraints;
+  selectedItems: MealPlanItem[];
+  totalCostUsd: number;
+  trafficLightSummary: { green: number; yellow: number; red: number };
+  packetFormat: PacketFormat;
+}
+
+export interface AIKernelOutput {
+  weeklyOverview: string;
+  budgetNarrative: string;
+  itemExplanations: { productName: string; explanation: string }[];
+  healthHighlights: string[];
+}
+
+export interface MealPlanPacket {
+  deterministic: DeterministicPayload;
+  narrative: AIKernelOutput;
+}
+
+// ---------------------------------------------------------------------------
+// Persisted plan record
+// ---------------------------------------------------------------------------
+export interface PlanRecord {
+  id: string;
+  jobId: string;
+  traceId: string;
+  scrapeRunId: string | null;
+  constraintsHash: string;
+  rulesVersion: string;
+  status: PlanStatus;
+  packet: MealPlanPacket | null;
+  fallbackUsed: boolean;
+  modelCallId: string | null;
+  generatedAt: string | null;
+  createdAt: string;
+}
