@@ -3,7 +3,8 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { sendApiError, sendJobAccepted } from "../utils/http";
 import { checkPricingAvailability } from "../services/priceService";
-import { enqueueJob } from "../services/planJobService";
+import { enqueueJob, getPlanJob } from "../services/planJobService";
+import { getPlan } from "../services/planService";
 import {
   HouseholdModel,
   PacketFormat,
@@ -183,13 +184,51 @@ export async function generatePlanHandler(
 export async function getJobHandler(
   req: Request,
   res: Response,
-  _next: NextFunction
+  next: NextFunction
 ): Promise<void> {
-  // Stub: returns a mock queued status so the frontend can integrate
+  const requestId = res.locals["requestId"] as string;
+  const { jobId } = req.params;
+
+  let job;
+  try {
+    job = await getPlanJob(jobId as string);
+  } catch (err) {
+    return next(err);
+  }
+
+  if (!job) {
+    sendApiError(res, 404, "NOT_FOUND", "Job not found.", { jobId }, requestId);
+    return;
+  }
+
   res.json({
-    jobId: req.params["jobId"],
-    status: "queued",
-    planId: null,
-    submittedAt: new Date().toISOString(),
+    jobId: job.id,
+    status: job.status,
+    planId: job.plan_id ?? null,
+    submittedAt: job.created_at,
   });
+}
+
+export async function getPlanHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const requestId = res.locals["requestId"] as string;
+  const { planId } = req.params;
+
+  let plan;
+  try {
+    plan = await getPlan(planId as string);
+  } catch (err) {
+    return next(err);
+  }
+
+  if (!plan) {
+    sendApiError(res, 404, "NOT_FOUND", "Plan not found.", { planId }, requestId);
+    return;
+  }
+
+  // Return the plan resource directly — no envelope (per API_DESIGN_RULES.md §2)
+  res.json(plan);
 }
