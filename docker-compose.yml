@@ -1,0 +1,26 @@
+# The PostgreSQL database is shared with the grocery-scraper module.
+# Start the database from ../grocery-scraper:
+#   cd ../grocery-scraper && docker compose up -d
+#
+# This file is provided for running the API service in Docker only.
+# The API connects to the same grocery_postgres container via the shared network.
+
+version: "3.9"
+
+services:
+  api:
+    build: .
+    container_name: budgetbites_api
+    environment:
+      DATABASE_URL: postgresql://grocery:grocery@postgres:5432/grocery
+      PORT: 3001
+      NODE_ENV: development
+    ports:
+      - "3001:3001"
+    networks:
+      - grocery_default
+
+networks:
+  grocery_default:
+    external: true
+    name: grocery-scraper_default
