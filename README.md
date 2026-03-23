@@ -196,6 +196,6 @@ docs/
 | Module | Role |
 |---|---|
 | `../grocery-scraper` | Writes pricing records to `grocery_prices` (shared DB) |
-| `../consumer-front-end` | B2B multi-tenant clinic portal — Lively Live Better is the pilot clinic |
+| `../clinic-front-end` | B2B multi-tenant clinic portal — Lively Live Better is the pilot clinic |
 | `../front-end` | B2C consumer frontend |
 | `../admin-dashboard` | Product Owner Portal |
