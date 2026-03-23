@@ -79,6 +79,17 @@ export interface PlanJobResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Nutrition data from USDA FoodData Central (per 100g serving basis)
+// ---------------------------------------------------------------------------
+export interface NutritionData {
+  sodiumMgPer100g: number | null;
+  carbsGPer100g: number | null;
+  energyKcalPer100g: number | null;
+  fdcId: number | null;
+  source: "usda" | "fallback";
+}
+
+// ---------------------------------------------------------------------------
 // Mirror of GroceryPriceEntry from grocery-scraper.
 // Not imported directly to keep modules decoupled at this stage.
 // ---------------------------------------------------------------------------

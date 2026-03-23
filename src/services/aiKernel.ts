@@ -6,10 +6,12 @@
 // - Returns: narrative layer only — weeklyOverview, budgetNarrative, itemExplanations, healthHighlights.
 // - NEVER invents prices, macros, quantities, or clinical guidance.
 // - All AI output is schema-validated with Zod. Invalid output → deterministic fallback.
-// - fallbackUsed is always recorded in the audit record.
+// - Every call is logged to ai_kernel_log. PHI staging gate: input column must never
+//   contain patientRef, clinicId, or clinicalNotes.
 
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
+import { pool } from "../db/pool";
 import { AIKernelOutput, DeterministicPayload } from "../types/plans";
 
 const client = new Anthropic({
@@ -20,25 +22,24 @@ const MODEL = process.env.AI_KERNEL_MODEL ?? "claude-sonnet-4-6";
 const MAX_TOKENS = 1024;
 
 // ---------------------------------------------------------------------------
-// Output schema — all AI responses are validated against this before use.
-// Invalid response → FALLBACK_OUTPUT used instead; fallbackUsed=true recorded.
+// Output schema — all AI responses are validated before use.
+// Invalid response → FALLBACK_OUTPUT; fallbackUsed=true recorded.
 // ---------------------------------------------------------------------------
 const AIKernelOutputSchema = z.object({
-  weeklyOverview: z.string().min(1).max(1000),
-  budgetNarrative: z.string().min(1).max(500),
-  itemExplanations: z
-    .array(
-      z.object({
-        productName: z.string().min(1),
-        explanation: z.string().min(1).max(300),
-      })
-    )
-    .min(0),
+  weeklyOverview:   z.string().min(1).max(1000),
+  budgetNarrative:  z.string().min(1).max(500),
+  itemExplanations: z.array(
+    z.object({
+      productName: z.string().min(1),
+      explanation: z.string().min(1).max(300),
+    })
+  ).min(0),
   healthHighlights: z.array(z.string().min(1).max(200)).min(1).max(5),
 });
 
 // ---------------------------------------------------------------------------
-// Deterministic fallback — used when AI output fails schema validation.
+// Deterministic fallback — used when AI output fails schema validation or
+// the model is unreachable. fallbackUsed=true is always recorded in the audit.
 // ---------------------------------------------------------------------------
 const FALLBACK_OUTPUT: AIKernelOutput = {
   weeklyOverview:
@@ -73,30 +74,87 @@ Required JSON schema:
   "healthHighlights": ["<bullet 1>", "<bullet 2>", "<bullet 3>"]
 }`;
 
-// PHI GUARD: only the fields listed here are forwarded to the AI.
-// patientRef, clinicId, and clinicalNotes must NEVER appear in this payload.
+// ---------------------------------------------------------------------------
+// PHI GUARD — only the fields listed here are forwarded to the model.
+// patientRef, clinicId, and clinicalNotes must NEVER appear in this object.
+// This function is the enforcement point for the PHI staging gate.
+// ---------------------------------------------------------------------------
 function buildUserContent(payload: DeterministicPayload): string {
   return JSON.stringify({
-    weekOf: payload.weekOf,
-    householdModel: payload.householdModel,
-    budgetUsd: payload.budgetUsd,
-    effectiveBudgetUsd: payload.effectiveBudgetUsd,
-    totalCostUsd: payload.totalCostUsd,
+    weekOf:              payload.weekOf,
+    householdModel:      payload.householdModel,
+    budgetUsd:           payload.budgetUsd,
+    effectiveBudgetUsd:  payload.effectiveBudgetUsd,
+    totalCostUsd:        payload.totalCostUsd,
     resolvedConstraints: payload.resolvedConstraints,
     trafficLightSummary: payload.trafficLightSummary,
     selectedItems: payload.selectedItems.map((item) => ({
-      productName: item.productName,
-      price: item.price,
+      productName:  item.productName,
+      price:        item.price,
       trafficLight: item.trafficLight,
     })),
   });
 }
 
+// ---------------------------------------------------------------------------
+// Audit logging — best-effort; never throws, never blocks the pipeline.
+// ---------------------------------------------------------------------------
+async function logKernelCall(params: {
+  modelCallId: string;
+  planId: string;
+  traceId: string;
+  model: string;
+  input: DeterministicPayload;
+  output: AIKernelOutput | null;
+  fallbackUsed: boolean;
+  latencyMs: number;
+}): Promise<void> {
+  await pool.query(
+    `INSERT INTO ai_kernel_log
+       (model_call_id, plan_id, trace_id, model, input, output, fallback_used, latency_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (model_call_id) DO NOTHING`,
+    [
+      params.modelCallId,
+      params.planId,
+      params.traceId,
+      params.model,
+      buildUserContent(params.input), // PHI guard applied — same field set as model call
+      params.output ? JSON.stringify(params.output) : null,
+      params.fallbackUsed,
+      params.latencyMs,
+    ]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 export async function callAIKernel(
   payload: DeterministicPayload,
-  traceId: string
+  traceId: string,
+  planId: string
 ): Promise<{ output: AIKernelOutput; modelCallId: string; fallbackUsed: boolean }> {
   const modelCallId = `kernel_${traceId}_${Date.now()}`;
+  const start = Date.now();
+
+  const returnFallback = async (): Promise<{
+    output: AIKernelOutput;
+    modelCallId: string;
+    fallbackUsed: boolean;
+  }> => {
+    await logKernelCall({
+      modelCallId,
+      planId,
+      traceId,
+      model: MODEL,
+      input: payload,
+      output: null,
+      fallbackUsed: true,
+      latencyMs: Date.now() - start,
+    }).catch(() => void 0);
+    return { output: FALLBACK_OUTPUT, modelCallId, fallbackUsed: true };
+  };
 
   try {
     const response = await client.messages.create({
@@ -107,25 +165,32 @@ export async function callAIKernel(
     });
 
     const block = response.content[0];
-    if (!block || block.type !== "text") {
-      return { output: FALLBACK_OUTPUT, modelCallId, fallbackUsed: true };
-    }
+    if (!block || block.type !== "text") return returnFallback();
 
     let parsed: unknown;
     try {
       parsed = JSON.parse(block.text);
     } catch {
-      return { output: FALLBACK_OUTPUT, modelCallId, fallbackUsed: true };
+      return returnFallback();
     }
 
     const validation = AIKernelOutputSchema.safeParse(parsed);
-    if (!validation.success) {
-      return { output: FALLBACK_OUTPUT, modelCallId, fallbackUsed: true };
-    }
+    if (!validation.success) return returnFallback();
 
-    return { output: validation.data, modelCallId, fallbackUsed: false };
+    const output = validation.data;
+    await logKernelCall({
+      modelCallId,
+      planId,
+      traceId,
+      model: MODEL,
+      input: payload,
+      output,
+      fallbackUsed: false,
+      latencyMs: Date.now() - start,
+    }).catch(() => void 0);
+
+    return { output, modelCallId, fallbackUsed: false };
   } catch {
-    // AI model unavailable or errored — fallback silently, record fallbackUsed=true
-    return { output: FALLBACK_OUTPUT, modelCallId, fallbackUsed: true };
+    return returnFallback();
   }
 }
