@@ -24,6 +24,7 @@ import {
   selectItems,
 } from "../services/recipeMatcher";
 import { resolveConstraints } from "../services/nutritionRules";
+import { fetchNutritionMap } from "../services/nutritionService";
 import { HealthConstraints, PlanGenerateRequest } from "../types/plans";
 
 const POLL_MS = Number(process.env.PLAN_WORKER_POLL_MS ?? 2000);
@@ -62,7 +63,7 @@ export async function processNextJob(): Promise<boolean> {
     const scrapeRunId = prices[0]?.scrape_run_id ?? null;
 
     // -----------------------------------------------------------------------
-    // Step 4: Nutrition Rules Engine
+    // Step 4: Nutrition Rules Engine + USDA nutrition data
     // -----------------------------------------------------------------------
     if (VERBOSE) log("  step 4: resolving health constraints...");
     const constraints: HealthConstraints = request.healthConstraints;
@@ -71,6 +72,10 @@ export async function processNextJob(): Promise<boolean> {
       .update(JSON.stringify(constraints))
       .digest("hex");
     if (VERBOSE) log(`  step 4: constraints hash ${constraintsHash.slice(0, 8)}...`);
+
+    if (VERBOSE) log("  step 4: fetching USDA nutrition data...");
+    const nutritionMap = await fetchNutritionMap(prices.map((p) => p.product_name));
+    if (VERBOSE) log(`  step 4: nutrition data fetched for ${nutritionMap.size} items`);
 
     // -----------------------------------------------------------------------
     // Create the plan record (status: 'generating') before pipeline continues
@@ -90,7 +95,7 @@ export async function processNextJob(): Promise<boolean> {
     // Step 5: Recipe Matcher
     // -----------------------------------------------------------------------
     if (VERBOSE) log("  step 5: scoring and selecting items...");
-    const scoredItems = scoreItems(prices, resolved);
+    const scoredItems = scoreItems(prices, resolved, nutritionMap);
     const effectiveBudget = Math.round(request.budgetUsd * 0.9 * 100) / 100;
     const selectedItems = selectItems(scoredItems, effectiveBudget, request.householdModel);
     if (VERBOSE) log(`  step 5: ${selectedItems.length} items selected`);
@@ -115,7 +120,7 @@ export async function processNextJob(): Promise<boolean> {
     // -----------------------------------------------------------------------
     if (VERBOSE) log("  step 7: calling AI Kernel...");
     const { output: narrative, modelCallId, fallbackUsed } =
-      await callAIKernel(deterministicPayload, job.trace_id);
+      await callAIKernel(deterministicPayload, job.trace_id, planId);
     if (VERBOSE) log(`  step 7: AI Kernel complete (fallbackUsed=${fallbackUsed})`);
 
     // -----------------------------------------------------------------------

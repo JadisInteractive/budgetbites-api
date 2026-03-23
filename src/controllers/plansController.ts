@@ -6,6 +6,11 @@ import { checkPricingAvailability } from "../services/priceService";
 import { enqueueJob, getPlanJob } from "../services/planJobService";
 import { getPlan } from "../services/planService";
 import {
+  getIdempotencyRecord,
+  hashRequestBody,
+  saveIdempotencyRecord,
+} from "../services/idempotencyService";
+import {
   HouseholdModel,
   PacketFormat,
   PlanContext,
@@ -55,8 +60,31 @@ export async function generatePlanHandler(
 ): Promise<void> {
   const requestId = res.locals["requestId"] as string;
 
-  // TODO: check Idempotency-Key header and replay if duplicate
-  // const idempotencyKey = req.header("Idempotency-Key");
+  // Idempotency-Key: replay stored response for duplicate submissions.
+  const idempotencyKey = req.header("Idempotency-Key") ?? null;
+  const requestHash    = idempotencyKey ? hashRequestBody(req.body) : null;
+
+  if (idempotencyKey) {
+    let existing;
+    try {
+      existing = await getIdempotencyRecord(idempotencyKey);
+    } catch (err) {
+      return next(err);
+    }
+    if (existing) {
+      if (existing.request_hash !== requestHash) {
+        sendApiError(
+          res, 422, "CONFLICT",
+          "Idempotency-Key reused with a different request body.",
+          { idempotencyKey }, requestId
+        );
+        return;
+      }
+      // Replay the original response exactly
+      res.status(existing.response_status).json(existing.response_body);
+      return;
+    }
+  }
 
   // 1. Parse and validate request shape
   const parseResult = PlanGenerateRequestSchema.safeParse(req.body);
@@ -173,12 +201,19 @@ export async function generatePlanHandler(
     return next(err);
   }
 
-  sendJobAccepted(res, {
+  const responseBody = {
     jobId,
-    status: "queued",
+    status: "queued" as const,
     planId: null,
     submittedAt: new Date().toISOString(),
-  });
+  };
+
+  if (idempotencyKey && requestHash) {
+    await saveIdempotencyRecord(idempotencyKey, requestHash, 202, responseBody)
+      .catch(() => void 0); // best-effort — never fail the response over a cache write
+  }
+
+  sendJobAccepted(res, responseBody);
 }
 
 export async function getJobHandler(
